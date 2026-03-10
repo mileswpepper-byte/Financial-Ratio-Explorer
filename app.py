@@ -3,6 +3,20 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
+# Metrics that should be interpreted as percentages
+PERCENT_METRICS = [
+    "Gross Margin",
+    "Operating Margin",
+    "Net Profit Margin",
+    "Operating CF Margin",
+    "Free Cash Flow Margin",
+    "ROIC",
+    "ROE",
+    "ROA",
+    "DuPont ROE",
+    "Free Cash Flow Yield",
+]
+
 
 def _safe_series(index_like) -> pd.Series:
     """Return a NaN series for missing line items."""
@@ -20,7 +34,7 @@ def _get_row(df: pd.DataFrame, candidates: list[str]) -> pd.Series:
     return _safe_series(df.columns)
 
 
-def fetch_ratios(ticker: str) -> pd.DataFrame:
+def _compute_ratios_numeric(ticker: str) -> tuple[pd.DataFrame, float]:
     stock = yf.Ticker(ticker)
 
     income_statement = stock.financials
@@ -174,38 +188,24 @@ def fetch_ratios(ticker: str) -> pd.DataFrame:
         ratios_df = ratios_df.loc[last_four]
 
     # Convert selected metrics from decimals to percentage values (e.g. 0.23 -> 23.0)
-    percent_columns = [
-        "Gross Margin",
-        "Operating Margin",
-        "Net Profit Margin",
-        "Operating CF Margin",
-        "Free Cash Flow Margin",
-        "ROIC",
-        "ROE",
-        "ROA",
-        "DuPont ROE",
-        "Free Cash Flow Yield",
-    ]
-    for col in percent_columns:
+    for col in PERCENT_METRICS:
         if col in ratios_df.columns:
             ratios_df[col] = ratios_df[col] * 100
+
+    return ratios_df, latest_price
+
+
+def fetch_ratios(ticker: str) -> tuple[pd.DataFrame, float]:
+    """
+    Fetch ratios and format them as strings for display in the single-company view.
+    """
+    ratios_df, latest_price = _compute_ratios_numeric(ticker)
 
     # Present with years as columns and metrics as rows
     result = ratios_df.T
 
     # Add % sign to percentage-based rows for display, and round everything to 2 decimals
-    percent_rows = [
-        "Gross Margin",
-        "Operating Margin",
-        "Net Profit Margin",
-        "Operating CF Margin",
-        "Free Cash Flow Margin",
-        "ROIC",
-        "ROE",
-        "ROA",
-        "DuPont ROE",
-        "Free Cash Flow Yield",
-    ]
+    percent_rows = PERCENT_METRICS
     for row in percent_rows:
         if row in result.index:
             result.loc[row] = result.loc[row].apply(
@@ -240,19 +240,102 @@ st.markdown(
 
 st.title("Financial Ratio Explorer")
 
-ticker = st.text_input("Enter a stock ticker (e.g. AAPL, MSFT):", value="ISRG")
+mode = st.radio(
+    "Select view",
+    ["Single company", "Company comparison"],
+    horizontal=True,
+)
 
-if st.button("Get ratios"):
-    if not ticker:
-        st.error("Please enter a ticker symbol.")
-    else:
-        try:
-            symbol = ticker.strip().upper()
-            ratios, latest_price = fetch_ratios(symbol)
-        except Exception as e:
-            st.error(f"Could not fetch ratios for {ticker}: {e}")
+if mode == "Single company":
+    ticker = st.text_input("Enter a stock ticker (e.g. AAPL, MSFT):", value="ISRG")
+
+    if st.button("Get ratios"):
+        if not ticker:
+            st.error("Please enter a ticker symbol.")
         else:
-            st.success(f"Showing ratios for {symbol}")
-            if not np.isnan(latest_price):
-                st.subheader(f"Current {symbol} Share Price: ${latest_price:,.2f}")
-            st.dataframe(ratios, use_container_width=True, height=600)
+            try:
+                symbol = ticker.strip().upper()
+                ratios, latest_price = fetch_ratios(symbol)
+            except Exception as e:
+                st.error(f"Could not fetch ratios for {ticker}: {e}")
+            else:
+                st.success(f"Showing ratios for {symbol}")
+                if not np.isnan(latest_price):
+                    st.subheader(f"Current {symbol} Share Price: ${latest_price:,.2f}")
+                st.dataframe(ratios, use_container_width=True, height=600)
+
+else:
+    col1, col2 = st.columns(2)
+    with col1:
+        ticker_a = st.text_input("First ticker", value="AAPL")
+    with col2:
+        ticker_b = st.text_input("Second ticker", value="MSFT")
+
+    compare_clicked = st.button("Compare")
+
+    if compare_clicked:
+        if not ticker_a or not ticker_b:
+            st.error("Please enter both tickers.")
+        else:
+            sym_a = ticker_a.strip().upper()
+            sym_b = ticker_b.strip().upper()
+            try:
+                ratios_a, price_a = _compute_ratios_numeric(sym_a)
+                ratios_b, price_b = _compute_ratios_numeric(sym_b)
+            except Exception as e:
+                st.error(f"Could not fetch data: {e}")
+            else:
+                common_years = sorted(
+                    set(ratios_a.index).intersection(set(ratios_b.index))
+                )
+                if not common_years:
+                    st.error("No overlapping years of data for these tickers.")
+                else:
+                    year = st.selectbox(
+                        "Select year for comparison",
+                        common_years,
+                        index=len(common_years) - 1,
+                    )
+
+                    available_ratios = list(ratios_a.columns)
+                    selected_ratios = st.multiselect(
+                        "Ratios to compare",
+                        available_ratios,
+                        default=[r for r in ["ROE", "ROA", "ROIC"] if r in available_ratios],
+                    )
+
+                    if selected_ratios:
+                        data = {}
+                        for metric in selected_ratios:
+                            val_a = ratios_a.loc[year, metric]
+                            val_b = ratios_b.loc[year, metric]
+                            data[metric] = {sym_a: val_a, sym_b: val_b}
+
+                        comparison_df = pd.DataFrame(data).T
+
+                        # Format percentages and numbers similarly to single-company view
+                        for metric in comparison_df.index:
+                            if metric in PERCENT_METRICS:
+                                comparison_df.loc[metric] = comparison_df.loc[
+                                    metric
+                                ].apply(
+                                    lambda v: ""
+                                    if pd.isna(v)
+                                    else f"{float(v):.2f}%"
+                                )
+                            else:
+                                comparison_df.loc[metric] = comparison_df.loc[
+                                    metric
+                                ].apply(
+                                    lambda v: ""
+                                    if pd.isna(v)
+                                    else f"{float(v):.2f}"
+                                )
+
+                        st.subheader(f"Comparison for {year}")
+                        st.dataframe(
+                            comparison_df,
+                            use_container_width=True,
+                        )
+                    else:
+                        st.info("Select at least one ratio to compare.")
